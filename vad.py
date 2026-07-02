@@ -36,8 +36,8 @@ import onnxruntime as ort
 from config_manager import VadConfig
 
 CHUNK_MS = 32
-WINDOW_CHUNKS = 10  # 320ms
-HOP_CHUNKS = 5  # 160ms
+WINDOW_CHUNKS = 60  # 320ms
+HOP_CHUNKS = 30  # 160ms
 WINDOW_MS = WINDOW_CHUNKS * CHUNK_MS
 
 

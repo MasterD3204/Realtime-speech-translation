@@ -3,6 +3,8 @@ asr:
   model_dir: ./sherpa-onnx-zipformer-vi-30M-int8-2026-02-09
   language: vi
   num_threads: 4
+  decode_hop_ms: 960
+  local_agreement_n: 3
 
 llm:
   provider: openai
@@ -14,7 +16,7 @@ llm:
 
 vad:
   model_path: ./silero_vad.onnx
-  threshold: 0.5
+  threshold: 0.6
   min_silence_ms: 400
   min_speech_ms: 200
 

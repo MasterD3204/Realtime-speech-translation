@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from asr_adapter import ASRResult
 from config_manager import TranslationConfig
 from diff_utils import diff_new_suffix
-from llm_adapter import LLMAdapter, consume_with_wait_detection
+from llm_adapter import LLMAdapter, WAIT_TOKEN
 from vad import WINDOW_MS
 
 logger = logging.getLogger(__name__)
@@ -94,27 +94,55 @@ class TranslationPipeline:
             history_block = HISTORY_BLOCK_TEMPLATE.format(items=items)
         return SYSTEM_PROMPT_TEMPLATE.format(history_block=history_block)
 
-    async def process_window(self, asr_result: ASRResult) -> list[dict]:
+    async def process_window(
+        self,
+        asr_result: ASRResult,
+        *,
+        emit_asr_partial: bool = True,
+        strip_overlap: bool = True,
+        input_is_delta: bool = False,
+    ) -> list[dict]:
         events: list[dict] = []
+        async for event in self.process_window_stream(
+            asr_result,
+            emit_asr_partial=emit_asr_partial,
+            strip_overlap=strip_overlap,
+            input_is_delta=input_is_delta,
+        ):
+            events.append(event)
+        return events
+
+    async def process_window_stream(
+        self,
+        asr_result: ASRResult,
+        *,
+        emit_asr_partial: bool = True,
+        strip_overlap: bool = True,
+        input_is_delta: bool = False,
+    ):
         text = asr_result.text
 
         # Bước 1 — strip overlap nếu window nằm trước điểm freeze (chỉ có ý nghĩa
         # trong cùng một utterance — window_start_ms reset về 0 giữa các utterance)
         same_utterance = asr_result.utterance_id == self.last_freeze_utterance_id
-        if same_utterance and asr_result.window_start_ms < self.last_freeze_ms:
+        if strip_overlap and same_utterance and asr_result.window_start_ms < self.last_freeze_ms:
             text = diff_new_suffix(self.last_frozen_source, text)
 
         if not text:
-            return events
+            return
 
         # Bước 2 — update display (ASR side, màn hình trái)
         new_display = diff_new_suffix(self.display_buffer, text)
         self.display_buffer = text
-        if new_display:
-            events.append({"type": "asr_partial", "text": new_display})
+        if emit_asr_partial and new_display:
+            yield {"type": "asr_partial", "text": new_display}
 
-        # Bước 3 — update pending_buffer
-        self.pending_buffer = text
+        # Bước 3 — update pending_buffer. Sliding-window mode sends full window
+        # text, while LocalAgreement mode sends only newly committed deltas.
+        if input_is_delta and self.pending_buffer:
+            self.pending_buffer = f"{self.pending_buffer} {text}"
+        else:
+            self.pending_buffer = text
 
         # Bước 4 — gọi LLM
         try:
@@ -122,20 +150,34 @@ class TranslationPipeline:
             user_message = f"ĐOẠN MỚI: {self.pending_buffer}"
             logger.info("LLM >>> %s", user_message)
             stream = self.llm_adapter.complete(system_prompt, user_message, stream=True)
-            result = await consume_with_wait_detection(stream)
+            result = ""
+            streamed = False
+            async for delta in stream:
+                result += delta
+                stripped = result.strip()
+                if stripped == WAIT_TOKEN:
+                    await stream.aclose()
+                    logger.info("LLM <<< [WAIT]")
+                    yield {"type": "wait", "pending": self.pending_buffer}
+                    return
+                if not streamed and WAIT_TOKEN.startswith(stripped):
+                    continue
+                streamed = True
+                yield {"type": "translation_delta", "text": delta}
+            result = result.strip()
             logger.info("LLM <<< %s", result if result is not None else "[WAIT]")
         except Exception as exc:
-            events.append({"type": "error", "code": "llm_error", "message": str(exc)})
-            return events
+            yield {"type": "error", "code": "llm_error", "message": str(exc)}
+            return
 
-        if result is None:
-            events.append({"type": "wait", "pending": self.pending_buffer})
-            return events
+        if result == WAIT_TOKEN:
+            yield {"type": "wait", "pending": self.pending_buffer}
+            return
 
         result = strip_wrapping_quotes(result)
         if not result:
-            events.append({"type": "wait", "pending": self.pending_buffer})
-            return events
+            yield {"type": "wait", "pending": self.pending_buffer}
+            return
 
         self.frozen_segments.append(result)
         self.last_freeze_ms = asr_result.window_start_ms + WINDOW_MS
@@ -144,12 +186,12 @@ class TranslationPipeline:
         self.pending_buffer = ""
         self.display_buffer = ""
 
-        events.append({
+        yield {
             "type": "translation",
             "text": result,
             "segment_id": len(self.frozen_segments),
-        })
-        return events
+            "streamed": streamed,
+        }
 
     def reset(self) -> None:
         self.frozen_segments = []

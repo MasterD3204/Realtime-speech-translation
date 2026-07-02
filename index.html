@@ -339,9 +339,9 @@ let audioCtx, workletNode, sourceNode, analyserNode, micStream, animId;
 const TARGET_SR = 16000;
 
 let statSegs = 0, statChunks = 0, statWaits = 0;
-// VI pane: append-only — mỗi asr_partial event mang phần text MỚI (diff), không
-// phải toàn bộ transcript. Nối trực tiếp vào node text hiện có, không rebuild.
 let viNode = null;
+let viCommittedText = "";
+let viPartialText = "";
 // EN pane: mỗi translation event mang 1 segment đã frozen — nối vào CÙNG một
 // node đoạn văn (giống VI pane) để hiển thị liền mạch, không phải 1 khối/dòng
 // riêng cho mỗi câu.
@@ -394,7 +394,7 @@ function scrollBoth() {
   enBody.scrollTop = enBody.scrollHeight;
 }
 
-// ── VI pane — append-only, chỉ nhận phần text mới từ asr_partial ───────────
+// ── VI pane — committed text append, partial text replaceable ──────────────
 function ensureViNode() {
   if (viNode) return viNode;
   clearHint(viBody);
@@ -408,11 +408,23 @@ function ensureViNode() {
   return viNode;
 }
 
-function appendViText(newText) {
-  if (!newText) return;
+function renderViText() {
   const el = ensureViNode();
-  el.textContent = el.textContent ? `${el.textContent} ${newText}` : newText;
+  const parts = [];
+  if (viCommittedText) parts.push(viCommittedText);
+  if (viPartialText) parts.push(viPartialText);
+  el.textContent = parts.join(" ");
   scrollBoth();
+}
+
+function updateViText(newText, replace) {
+  if (replace) {
+    viPartialText = newText || "";
+  } else if (newText) {
+    viCommittedText = viCommittedText ? `${viCommittedText} ${newText}` : newText;
+    viPartialText = "";
+  }
+  renderViText();
 }
 
 // ── EN pane — append-only, mỗi translation event nối vào cùng 1 đoạn văn ───
@@ -459,10 +471,13 @@ function connect() {
 
     if (msg.type === "asr_partial") {
       statChunks++;
-      appendViText(msg.text || "");
+      updateViText(msg.text || "", Boolean(msg.replace));
       updateStats();
     } else if (msg.type === "translation") {
       statSegs++;
+      if (!msg.streamed) appendEnSegment(msg.text || "");
+      updateStats();
+    } else if (msg.type === "translation_delta") {
       appendEnSegment(msg.text || "");
       updateStats();
     } else if (msg.type === "wait") {
@@ -473,6 +488,8 @@ function connect() {
     } else if (msg.type === "reset_ack") {
       viNode = null;
       enNode = null;
+      viCommittedText = "";
+      viPartialText = "";
       viBody.innerHTML = '<div class="empty-hint">Bắt đầu ghi để thấy transcript…</div>';
       enBody.innerHTML = '<div class="empty-hint">Bản dịch sẽ xuất hiện ở đây…</div>';
     }

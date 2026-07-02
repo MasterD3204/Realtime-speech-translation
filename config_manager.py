@@ -19,6 +19,8 @@ class ASRConfig:
     model_dir: str = "./sherpa-onnx-zipformer-vi-30M-int8-2026-02-09"
     language: str = "vi"
     num_threads: int = 4
+    decode_hop_ms: int = 960
+    local_agreement_n: int = 3
 
 
 @dataclass

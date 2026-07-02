@@ -78,6 +78,29 @@ async def test_display_diff_only_sends_new_words_across_windows():
 
 
 @pytest.mark.asyncio
+async def test_delta_input_accumulates_pending_after_wait():
+    pipeline = make_pipeline(["[WAIT]", "Today is a nice day."])
+
+    events1 = await pipeline.process_window(
+        ASRResult(text="hôm nay là", window_start_ms=1000, utterance_id=0),
+        emit_asr_partial=False,
+        strip_overlap=False,
+        input_is_delta=True,
+    )
+    events2 = await pipeline.process_window(
+        ASRResult(text="một ngày đẹp", window_start_ms=2000, utterance_id=0),
+        emit_asr_partial=False,
+        strip_overlap=False,
+        input_is_delta=True,
+    )
+
+    assert {"type": "wait", "pending": "hôm nay là"} in events1
+    assert pipeline.llm_adapter.calls[1][1] == "ĐOẠN MỚI: hôm nay là một ngày đẹp"
+    assert events2[-1]["type"] == "translation"
+    assert pipeline.pending_buffer == ""
+
+
+@pytest.mark.asyncio
 async def test_overlap_strip_when_window_precedes_last_freeze_same_utterance():
     # Segment 1 dịch xong tại window_start_ms=0 (window 320ms -> last_freeze_ms=320)
     pipeline = make_pipeline(["First segment."])
