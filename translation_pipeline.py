@@ -16,6 +16,7 @@ qua một khoảng lặng, không còn gì để chồng lấn.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from asr_adapter import ASRResult
@@ -23,6 +24,8 @@ from config_manager import TranslationConfig
 from diff_utils import diff_new_suffix
 from llm_adapter import LLMAdapter, consume_with_wait_detection
 from vad import WINDOW_MS
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT_TEMPLATE = """Bạn là module dịch hội nghị streaming VI→EN.
 
@@ -117,8 +120,10 @@ class TranslationPipeline:
         try:
             system_prompt = self._build_system_prompt()
             user_message = f"ĐOẠN MỚI: {self.pending_buffer}"
+            logger.info("LLM >>> %s", user_message)
             stream = self.llm_adapter.complete(system_prompt, user_message, stream=True)
             result = await consume_with_wait_detection(stream)
+            logger.info("LLM <<< %s", result if result is not None else "[WAIT]")
         except Exception as exc:
             events.append({"type": "error", "code": "llm_error", "message": str(exc)})
             return events

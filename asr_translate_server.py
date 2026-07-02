@@ -14,6 +14,7 @@ Event protocol gửi về frontend (spec §2.4):
 
 import asyncio
 import json
+import logging
 
 import numpy as np
 import websockets
@@ -27,18 +28,30 @@ from vad import ChunkedSlidingVAD, SileroSpeechProbabilityModel
 HOST = "0.0.0.0"
 PORT = 6006
 SAMPLE_RATE = 16000
+LOG_FILE = "server.log"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger("server")
 
 config_manager = ConfigManager.load("config.yaml")
 config = config_manager.config
 
-print(f"[Server] Loading ASR model from {config.asr.model_dir} ...")
+logger.info("Loading ASR model from %s ...", config.asr.model_dir)
 asr_adapter = SherpaOnnxAdapter(config.asr.model_dir, num_threads=config.asr.num_threads, sample_rate=SAMPLE_RATE)
-print(f"[Server] Models loaded. Listening on ws://{HOST}:{PORT}")
+logger.info("Models loaded. Listening on ws://%s:%s", HOST, PORT)
 
 
 async def handle_client(websocket):
     client_addr = websocket.remote_address
-    print(f"[+] {client_addr} connected")
+    logger.info("[+] %s connected", client_addr)
 
     # Mỗi client giữ VAD + pipeline riêng (VAD có recurrent state không share được)
     speech_model = SileroSpeechProbabilityModel(config.vad.model_path, sample_rate=SAMPLE_RATE)
@@ -59,9 +72,9 @@ async def handle_client(websocket):
         for event in events:
             await send(event)
             if event["type"] == "translation":
-                print(f"[Translation #{event['segment_id']}] {event['text']}")
+                logger.info("[Translation #%s] %s", event["segment_id"], event["text"])
             elif event["type"] == "error":
-                print(f"[Error] {event['code']}: {event['message']}")
+                logger.error("[%s] %s", event["code"], event["message"])
 
     try:
         async for message in websocket:
@@ -83,7 +96,7 @@ async def handle_client(websocket):
                     vad.reset()
                     leftover = np.empty(0, dtype=np.float32)
                     await send({"type": "reset_ack"})
-                    print(f"[{client_addr}] Session reset")
+                    logger.info("[%s] Session reset", client_addr)
 
                 elif msg_type == "config_update":
                     patch = {k: v for k, v in data.items() if k != "type"}
@@ -94,7 +107,7 @@ async def handle_client(websocket):
                             min_silence_ms=patch["vad"].get("min_silence_ms"),
                             min_speech_ms=patch["vad"].get("min_speech_ms"),
                         )
-                    print(f"[{client_addr}] Config updated: {patch}")
+                    logger.info("[%s] Config updated: %s", client_addr, patch)
 
                 continue
 
@@ -133,16 +146,14 @@ async def handle_client(websocket):
             leftover = buffer[n_chunks * chunk_samples:]
 
     except websockets.exceptions.ConnectionClosed:
-        print(f"[-] {client_addr} disconnected")
-    except Exception as e:
-        print(f"[!] Error from {client_addr}: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.info("[-] %s disconnected", client_addr)
+    except Exception:
+        logger.exception("Error from %s", client_addr)
 
 
 async def main():
     async with websockets.serve(handle_client, HOST, PORT, max_size=None):
-        print("[Server] Ready.")
+        logger.info("Server ready.")
         await asyncio.Future()
 
 
