@@ -342,8 +342,10 @@ let statSegs = 0, statChunks = 0, statWaits = 0;
 // VI pane: append-only — mỗi asr_partial event mang phần text MỚI (diff), không
 // phải toàn bộ transcript. Nối trực tiếp vào node text hiện có, không rebuild.
 let viNode = null;
-// EN pane: mỗi translation event mang 1 segment hoàn chỉnh (frozen), append riêng.
-let enHasContent = false;
+// EN pane: mỗi translation event mang 1 segment đã frozen — nối vào CÙNG một
+// node đoạn văn (giống VI pane) để hiển thị liền mạch, không phải 1 khối/dòng
+// riêng cho mỗi câu.
+let enNode = null;
 
 // ── DOM ───────────────────────────────────────────────────────────────────
 const dot        = document.getElementById("dot");
@@ -413,17 +415,24 @@ function appendViText(newText) {
   scrollBoth();
 }
 
-// ── EN pane — append-only, mỗi translation event = 1 segment mới ───────────
-function appendEnSegment(text) {
+// ── EN pane — append-only, mỗi translation event nối vào cùng 1 đoạn văn ───
+function ensureEnNode() {
+  if (enNode) return enNode;
   clearHint(enBody);
-  enHasContent = true;
   const segment = document.createElement("div");
   segment.className = "segment frozen";
   const textEl = document.createElement("div");
   textEl.className = "segment-text";
-  textEl.textContent = text;
   segment.appendChild(textEl);
   enBody.appendChild(segment);
+  enNode = textEl;
+  return enNode;
+}
+
+function appendEnSegment(text) {
+  if (!text) return;
+  const el = ensureEnNode();
+  el.textContent = el.textContent ? `${el.textContent} ${text}` : text;
   scrollBoth();
 }
 
@@ -463,7 +472,7 @@ function connect() {
       setStatus("error", `Lỗi [${msg.code}]: ${msg.message}`);
     } else if (msg.type === "reset_ack") {
       viNode = null;
-      enHasContent = false;
+      enNode = null;
       viBody.innerHTML = '<div class="empty-hint">Bắt đầu ghi để thấy transcript…</div>';
       enBody.innerHTML = '<div class="empty-hint">Bản dịch sẽ xuất hiện ở đây…</div>';
     }
@@ -567,7 +576,7 @@ function resetSession() {
   statSegs = statChunks = statWaits = 0;
   updateStats();
   viNode = null;
-  enHasContent = false;
+  enNode = null;
   viBody.innerHTML = '<div class="empty-hint">Bắt đầu ghi để thấy transcript…</div>';
   enBody.innerHTML = '<div class="empty-hint">Bản dịch sẽ xuất hiện ở đây…</div>';
   if (ws?.readyState === WebSocket.OPEN) {
