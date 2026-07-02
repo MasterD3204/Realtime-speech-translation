@@ -86,7 +86,11 @@ class ConfigManager:
         config = Config(**sections)
 
         if not config.llm.api_key:
-            config.llm.api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+            config.llm.api_key = (
+                os.environ.get("LLM_API_KEY")
+                or os.environ.get("GEMINI_API_KEY")
+                or os.environ.get("OPENAI_API_KEY")
+            )
 
         return cls(config)
 

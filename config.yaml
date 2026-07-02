@@ -5,9 +5,9 @@ asr:
   num_threads: 4
 
 llm:
-  provider: gemini
-  model: models/gemini-3.1-flash-lite
-  base_url:
+  provider: openai
+  model: misa-ai-1.1-mini
+  base_url: https://ai.misa.vn/nlp/llm-gateway/v1
   api_key:
   temperature: 0.1
   max_tokens: 256

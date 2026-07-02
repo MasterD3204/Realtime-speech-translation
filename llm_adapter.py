@@ -139,6 +139,10 @@ class OpenAIAdapter:
             stream=True,
         )
         async for chunk in response:
+            # Một số gateway (OpenAI-compatible) gửi thêm chunk cuối chỉ mang
+            # usage/stats với choices=[] — bỏ qua thay vì crash IndexError.
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta.content
             if delta:
                 yield delta

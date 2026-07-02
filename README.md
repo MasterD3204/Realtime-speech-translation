@@ -14,8 +14,9 @@ Microphone → WebSocket → VAD → ASR (sliding window) → Translation Pipeli
 - **ASR sliding window**: cửa sổ 320ms, hop 160ms (overlap 160ms giữa 2 window liên tiếp) chạy trên sherpa-onnx (Zipformer tiếng Việt), tránh cắt ngang từ.
 - **Translation Pipeline có state**: quản lý `frozen_segments` / `pending_buffer` / `display_buffer`, tự động strip phần overlap trùng lặp giữa các window, chỉ gửi phần transcript mới (diff) ra frontend.
 - **LLM streaming + early-cancel**: phát hiện token `[WAIT]` ngay từ đầu stream để hủy sớm, không đợi hết generation khi câu chưa đủ nghĩa để dịch.
-- **Provider swap được**: ASR và LLM đều qua interface adapter mỏng — đổi provider (vd. Gemini ↔ OpenAI/vLLM) không đụng vào pipeline.
+- **Provider swap được**: ASR và LLM đều qua interface adapter mỏng — đổi provider (vd. OpenAI-compatible gateway ↔ Gemini) không đụng vào pipeline.
 - **Frontend AudioWorklet**: capture PCM trên audio thread (không phải `ScriptProcessorNode` đã deprecated), render append-only (không rebuild lại toàn bộ DOM mỗi lần nhận text mới).
+- **Log input/output LLM liên tục**: mỗi lần gọi LLM đều log prompt gửi đi và response nhận về (`server.log` + stdout), tiện theo dõi chất lượng dịch khi server đang chạy.
 
 ## Kiến trúc & cấu trúc file
 
@@ -49,7 +50,7 @@ tests/                        # Unit test cho toàn bộ core logic (không cầ
 - Python 3.11+
 - Model ASR: thư mục `sherpa-onnx-zipformer-vi-30M-int8-2026-02-09/` (đã có sẵn trong repo — `encoder`, `decoder`, `joiner`, `tokens.txt`)
 - Model VAD: `silero_vad.onnx` (đã có sẵn trong repo)
-- API key Gemini (mặc định) hoặc OpenAI-compatible endpoint (vLLM, v.v.)
+- Endpoint LLM tương thích OpenAI chat-completions API (mặc định cấu hình sẵn cho gateway nội bộ MISA; đổi sang Gemini/vLLM/OpenAI đều được — xem phần "Provider khác")
 
 ### Dependencies
 
@@ -67,13 +68,15 @@ pip install pytest pytest-asyncio pytest-cov
 
 ### 1. Cấu hình API key
 
-Server đọc `GEMINI_API_KEY` (hoặc `OPENAI_API_KEY` nếu dùng provider `openai`) từ biến môi trường — không hardcode key trong `config.yaml`.
+Server đọc key theo thứ tự ưu tiên `LLM_API_KEY` → `GEMINI_API_KEY` → `OPENAI_API_KEY` từ biến môi trường — không hardcode key trong `config.yaml`.
 
 ```bash
-export GEMINI_API_KEY="your-api-key-here"
+export LLM_API_KEY="your-api-key-here"
 ```
 
 ### 2. Chỉnh `config.yaml` nếu cần
+
+Mặc định trỏ sẵn tới gateway OpenAI-compatible nội bộ (MISA):
 
 ```yaml
 asr:
@@ -82,9 +85,9 @@ asr:
   num_threads: 4
 
 llm:
-  provider: gemini              # hoặc "openai" (vLLM / OpenAI-compatible endpoint)
-  model: models/gemini-3.1-flash-lite
-  base_url:                     # cần cho provider openai (vd. http://localhost:8000/v1)
+  provider: openai
+  model: misa-ai-1.1-mini
+  base_url: https://ai.misa.vn/nlp/llm-gateway/v1
   temperature: 0.1
   max_tokens: 256
 
@@ -115,6 +118,26 @@ python -m http.server 8080
 Mở `http://127.0.0.1:8080/index.html` (không dùng `0.0.0.0` — trình duyệt không kết nối được tới địa chỉ đó). Nếu mở từ máy khác, nhập đúng IP máy chạy server vào ô WebSocket URL, ví dụ `ws://192.168.x.x:6006`.
 
 Bấm **Kết nối** → **▶ Ghi** để bắt đầu nói. Có thể chỉnh 3 tham số VAD (threshold, min silence, min speech) trực tiếp trên UI và bấm **Áp dụng VAD** — thay đổi có hiệu lực ngay, không cần reconnect.
+
+## Xem log lúc chạy
+
+Server log ra cả terminal và file `server.log` (có timestamp), gồm mọi input/output gửi lên LLM — tiện xem liên tục để đánh giá chất lượng dịch:
+
+```bash
+python asr_translate_server.py       # log hiện trực tiếp trên terminal đang chạy
+tail -f server.log                   # hoặc xem lại/theo dõi từ terminal khác
+```
+
+Mỗi lần gọi LLM in ra 2 dòng:
+
+```
+14:32:07 [INFO] translation_pipeline: LLM >>> ĐOẠN MỚI: hôm nay là một
+14:32:07 [INFO] translation_pipeline: LLM <<< [WAIT]
+14:32:08 [INFO] translation_pipeline: LLM >>> ĐOẠN MỚI: hôm nay là một ngày đẹp trời
+14:32:08 [INFO] translation_pipeline: LLM <<< Today is a beautiful day.
+```
+
+Nếu không thấy dòng `LLM <<<` xuất hiện dù có nói vào mic, kiểm tra dòng log lúc khởi động (`LLM provider=... model=... base_url=...`) và dòng lỗi `Failed to initialize session` — nếu adapter khởi tạo lỗi (thiếu `LLM_API_KEY`, sai `base_url`/`model`), server đóng kết nối ngay và log lỗi rõ ràng thay vì chết âm thầm.
 
 ## WebSocket Event Protocol
 
@@ -147,7 +170,7 @@ Phần **không** unit test (cần model/network thật, verify bằng chạy ta
 
 ## Provider khác
 
-Đổi sang OpenAI-compatible endpoint (vd. tự host vLLM) chỉ cần sửa `config.yaml`:
+Đổi sang tự host vLLM hoặc OpenAI thật chỉ cần sửa `config.yaml` (cùng `provider: openai`, khác `base_url`/`model`):
 
 ```yaml
 llm:
@@ -156,4 +179,12 @@ llm:
   base_url: http://localhost:8000/v1
 ```
 
-`OpenAIAdapter` cùng interface với `GeminiAdapter` (`llm_adapter.py`) — không cần đổi gì ở `translation_pipeline.py`.
+Đổi sang Gemini:
+
+```yaml
+llm:
+  provider: gemini
+  model: models/gemini-3.1-flash-lite
+```
+
+`GeminiAdapter`/`OpenAIAdapter` cùng interface (`llm_adapter.py`) — không cần đổi gì ở `translation_pipeline.py`.

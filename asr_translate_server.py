@@ -46,6 +46,10 @@ config = config_manager.config
 
 logger.info("Loading ASR model from %s ...", config.asr.model_dir)
 asr_adapter = SherpaOnnxAdapter(config.asr.model_dir, num_threads=config.asr.num_threads, sample_rate=SAMPLE_RATE)
+logger.info(
+    "LLM provider=%s model=%s base_url=%s",
+    config.llm.provider, config.llm.model, config.llm.base_url,
+)
 logger.info("Models loaded. Listening on ws://%s:%s", HOST, PORT)
 
 
@@ -53,11 +57,19 @@ async def handle_client(websocket):
     client_addr = websocket.remote_address
     logger.info("[+] %s connected", client_addr)
 
-    # Mỗi client giữ VAD + pipeline riêng (VAD có recurrent state không share được)
-    speech_model = SileroSpeechProbabilityModel(config.vad.model_path, sample_rate=SAMPLE_RATE)
-    vad = ChunkedSlidingVAD(speech_model, config.vad, sample_rate=SAMPLE_RATE)
-    llm_adapter = build_llm_adapter(config.llm)
-    pipeline = TranslationPipeline(llm_adapter, config.translation)
+    # Mỗi client giữ VAD + pipeline riêng (VAD có recurrent state không share được).
+    # Bọc try/except riêng: nếu adapter khởi tạo lỗi (thiếu key, sai base_url, model
+    # không tồn tại...) phải thấy lỗi rõ ràng ngay, không được chết âm thầm trước khi
+    # vòng lặp message bên dưới (với try/except riêng của nó) kịp chạy.
+    try:
+        speech_model = SileroSpeechProbabilityModel(config.vad.model_path, sample_rate=SAMPLE_RATE)
+        vad = ChunkedSlidingVAD(speech_model, config.vad, sample_rate=SAMPLE_RATE)
+        llm_adapter = build_llm_adapter(config.llm)
+        pipeline = TranslationPipeline(llm_adapter, config.translation)
+    except Exception:
+        logger.exception("[%s] Failed to initialize session (VAD/LLM adapter)", client_addr)
+        await websocket.close(code=1011, reason="session init failed")
+        return
 
     chunk_samples = vad.chunk_samples
     leftover = np.empty(0, dtype=np.float32)
