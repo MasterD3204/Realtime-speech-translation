@@ -1,0 +1,24 @@
+asr:
+  provider: sherpa_onnx
+  model_dir: ./sherpa-onnx-zipformer-vi-30M-int8-2026-02-09
+  language: vi
+  num_threads: 4
+
+llm:
+  provider: gemini
+  model: models/gemini-3.1-flash-lite
+  base_url:
+  api_key:
+  temperature: 0.1
+  max_tokens: 256
+
+vad:
+  model_path: ./silero_vad.onnx
+  threshold: 0.5
+  min_silence_ms: 400
+  min_speech_ms: 200
+
+translation:
+  source_lang: vi
+  target_lang: en
+  frozen_context_window: 3

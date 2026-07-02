@@ -92,6 +92,36 @@ input[type="text"]:focus { border-color: #6366f1; }
 
 .status-label { font-size: 0.78rem; color: #64748b; }
 
+/* ── VAD Config Panel ────────────────────────────────────── */
+.vad-panel {
+  padding: 8px 24px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: #0c0e14;
+  border-bottom: 1px solid #1e2330;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+.vad-panel label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: #64748b;
+}
+.vad-panel input[type="number"] {
+  background: #1e2330;
+  border: 1px solid #2d3448;
+  border-radius: 6px;
+  padding: 4px 8px;
+  color: #e2e8f0;
+  font-size: 0.78rem;
+  width: 72px;
+  outline: none;
+}
+.vad-panel input[type="number"]:focus { border-color: #6366f1; }
+
 /* ── Visualizer ──────────────────────────────────────────── */
 .viz-bar {
   height: 36px;
@@ -242,6 +272,20 @@ footer {
   </div>
 </header>
 
+<!-- ── VAD Config Panel ── -->
+<div class="vad-panel">
+  <label>Threshold
+    <input type="number" id="vad-threshold" value="0.5" min="0" max="1" step="0.05">
+  </label>
+  <label>Min silence (ms)
+    <input type="number" id="vad-min-silence" value="400" min="0" step="20">
+  </label>
+  <label>Min speech (ms)
+    <input type="number" id="vad-min-speech" value="200" min="0" step="20">
+  </label>
+  <button class="btn btn-reset" id="btn-vad-apply">Áp dụng VAD</button>
+</div>
+
 <!-- ── Visualizer ── -->
 <div class="viz-bar">
   <canvas id="canvas"></canvas>
@@ -290,18 +334,16 @@ footer {
 
 // ── State ─────────────────────────────────────────────────────────────────
 let ws = null;
-let audioCtx, processor, sourceNode, analyserNode, micStream, animId;
+let audioCtx, workletNode, sourceNode, analyserNode, micStream, animId;
 
-const TARGET_SR  = 16000;
-const SEND_EVERY = 512;   // 32ms @ 16kHz
-const BUF_SIZE   = 512;   // fire onaudioprocess every 32ms
-let accumBuf = new Float32Array(0);
+const TARGET_SR = 16000;
 
 let statSegs = 0, statChunks = 0, statWaits = 0;
-let viAccumText = "";
-let viFrozenText = "";
-let enFrozenText = "";
-let enPreviewText = "";
+// VI pane: append-only — mỗi asr_partial event mang phần text MỚI (diff), không
+// phải toàn bộ transcript. Nối trực tiếp vào node text hiện có, không rebuild.
+let viNode = null;
+// EN pane: mỗi translation event mang 1 segment hoàn chỉnh (frozen), append riêng.
+let enHasContent = false;
 
 // ── DOM ───────────────────────────────────────────────────────────────────
 const dot        = document.getElementById("dot");
@@ -316,6 +358,10 @@ const viBody     = document.getElementById("vi-body");
 const enBody     = document.getElementById("en-body");
 const canvas     = document.getElementById("canvas");
 const ctx2d      = canvas.getContext("2d");
+const vadThreshold  = document.getElementById("vad-threshold");
+const vadMinSilence = document.getElementById("vad-min-silence");
+const vadMinSpeech  = document.getElementById("vad-min-speech");
+const btnVadApply   = document.getElementById("btn-vad-apply");
 
 // ── UI helpers ────────────────────────────────────────────────────────────
 function setStatus(state, text) {
@@ -346,38 +392,38 @@ function scrollBoth() {
   enBody.scrollTop = enBody.scrollHeight;
 }
 
-// ── VI pane ───────────────────────────────────────────────────────────────
-function renderViPane() {
+// ── VI pane — append-only, chỉ nhận phần text mới từ asr_partial ───────────
+function ensureViNode() {
+  if (viNode) return viNode;
   clearHint(viBody);
-  const fullText = [viFrozenText, viAccumText].filter(Boolean).join(" ").trim();
-  viBody.innerHTML = `<div class="segment pending"><div class="segment-text">${escHtml(fullText)}</div></div>`;
+  const segment = document.createElement("div");
+  segment.className = "segment pending";
+  const textEl = document.createElement("div");
+  textEl.className = "segment-text";
+  segment.appendChild(textEl);
+  viBody.appendChild(segment);
+  viNode = textEl;
+  return viNode;
+}
+
+function appendViText(newText) {
+  if (!newText) return;
+  const el = ensureViNode();
+  el.textContent = el.textContent ? `${el.textContent} ${newText}` : newText;
   scrollBoth();
 }
 
-function freezeViPending(frozenText) {
-  viFrozenText = [viFrozenText, frozenText].filter(Boolean).join(" ").trim();
-  viAccumText = "";
-  renderViPane();
-}
-
-// ── EN pane ───────────────────────────────────────────────────────────────
-function showEnPending() {
+// ── EN pane — append-only, mỗi translation event = 1 segment mới ───────────
+function appendEnSegment(text) {
   clearHint(enBody);
-  const preview = enPreviewText
-    ? ` ${escHtml(enPreviewText)}`
-    : "";
-  const content = enFrozenText
-    ? `${escHtml(enFrozenText)} <span class="en-pending"><span class="spinner"></span>Đang dịch…</span>${preview}`
-    : `<span class="en-pending"><span class="spinner"></span>Đang dịch…</span>${preview}`;
-  enBody.innerHTML = `<div class="segment"><div class="segment-text">${content}</div></div>`;
-  scrollBoth();
-}
-
-function appendEnTranslation(text) {
-  clearHint(enBody);
-  enFrozenText = [enFrozenText, text].filter(Boolean).join(" ").trim();
-  enPreviewText = "";
-  enBody.innerHTML = `<div class="segment frozen"><div class="segment-text">${escHtml(enFrozenText)}</div></div>`;
+  enHasContent = true;
+  const segment = document.createElement("div");
+  segment.className = "segment frozen";
+  const textEl = document.createElement("div");
+  textEl.className = "segment-text";
+  textEl.textContent = text;
+  segment.appendChild(textEl);
+  enBody.appendChild(segment);
   scrollBoth();
 }
 
@@ -403,30 +449,23 @@ function connect() {
     try { msg = JSON.parse(data); } catch { return; }
 
     if (msg.type === "asr_partial") {
-      viAccumText = msg.text || "";
-      renderViPane();
-    } else if (msg.type === "asr") {
       statChunks++;
-      viAccumText = msg.text || "";
-      renderViPane();
-      showEnPending();
+      appendViText(msg.text || "");
       updateStats();
-    } else if (msg.type === "translation_partial") {
-      enPreviewText = msg.en || "";
-      showEnPending();
     } else if (msg.type === "translation") {
       statSegs++;
-      freezeViPending(msg.vi);
-      appendEnTranslation(msg.en);
+      appendEnSegment(msg.text || "");
       updateStats();
     } else if (msg.type === "wait") {
       statWaits++;
       updateStats();
+    } else if (msg.type === "error") {
+      setStatus("error", `Lỗi [${msg.code}]: ${msg.message}`);
     } else if (msg.type === "reset_ack") {
-      viAccumText = "";
-      viFrozenText = "";
-      enFrozenText = "";
-      enPreviewText = "";
+      viNode = null;
+      enHasContent = false;
+      viBody.innerHTML = '<div class="empty-hint">Bắt đầu ghi để thấy transcript…</div>';
+      enBody.innerHTML = '<div class="empty-hint">Bản dịch sẽ xuất hiện ở đây…</div>';
     }
   };
 
@@ -448,32 +487,23 @@ async function startMic() {
     setStatus("error", "Trình duyệt chặn mic — cần HTTPS hoặc mở file:// trực tiếp");
     return;
   }
-  accumBuf = new Float32Array(0);
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     audioCtx   = new AudioContext({ sampleRate: TARGET_SR });
+    await audioCtx.audioWorklet.addModule("audio-worklet.js");
+
     sourceNode = audioCtx.createMediaStreamSource(micStream);
 
     analyserNode = audioCtx.createAnalyser();
     analyserNode.fftSize = 256;
     sourceNode.connect(analyserNode);
 
-    processor = audioCtx.createScriptProcessor(BUF_SIZE, 1, 1);
-    sourceNode.connect(processor);
-    processor.connect(audioCtx.destination);
-
-    processor.onaudioprocess = (e) => {
+    workletNode = new AudioWorkletNode(audioCtx, "pcm-capture-processor");
+    workletNode.port.onmessage = (e) => {
       if (ws?.readyState !== WebSocket.OPEN) return;
-      const chunk = e.inputBuffer.getChannelData(0);
-      const merged = new Float32Array(accumBuf.length + chunk.length);
-      merged.set(accumBuf);
-      merged.set(chunk, accumBuf.length);
-      accumBuf = merged;
-      while (accumBuf.length >= SEND_EVERY) {
-        ws.send(accumBuf.slice(0, SEND_EVERY).buffer);
-        accumBuf = accumBuf.slice(SEND_EVERY);
-      }
+      ws.send(e.data.buffer);
     };
+    sourceNode.connect(workletNode);
 
     setStatus("listening", "Đang ghi âm…");
     setUI(true, true);
@@ -485,13 +515,12 @@ async function startMic() {
 
 function stopMic() {
   cancelAnimationFrame(animId);
-  processor?.disconnect();   processor = null;
+  workletNode?.disconnect(); workletNode = null;
   sourceNode?.disconnect();  sourceNode = null;
   analyserNode = null;
   audioCtx?.close();         audioCtx = null;
   micStream?.getTracks().forEach(t => t.stop()); micStream = null;
   ctx2d.clearRect(0, 0, canvas.width, canvas.height);
-  accumBuf = new Float32Array(0);
   if (ws?.readyState === WebSocket.OPEN) {
     setStatus("connected", "Đã dừng · sẵn sàng ghi lại");
     setUI(true, false);
@@ -537,15 +566,26 @@ function drawViz() {
 function resetSession() {
   statSegs = statChunks = statWaits = 0;
   updateStats();
-  viAccumText = "";
-  viFrozenText = "";
-  enFrozenText = "";
-  enPreviewText = "";
+  viNode = null;
+  enHasContent = false;
   viBody.innerHTML = '<div class="empty-hint">Bắt đầu ghi để thấy transcript…</div>';
   enBody.innerHTML = '<div class="empty-hint">Bản dịch sẽ xuất hiện ở đây…</div>';
   if (ws?.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "reset" }));
   }
+}
+
+// ── VAD Config Panel — gửi config_update, backend apply runtime không restart ──
+function applyVadConfig() {
+  if (ws?.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({
+    type: "config_update",
+    vad: {
+      threshold: parseFloat(vadThreshold.value),
+      min_silence_ms: parseInt(vadMinSilence.value, 10),
+      min_speech_ms: parseInt(vadMinSpeech.value, 10),
+    },
+  }));
 }
 
 // ── Events ────────────────────────────────────────────────────────────────
@@ -554,6 +594,7 @@ btnDisc.addEventListener("click", disconnect);
 btnStart.addEventListener("click", startMic);
 btnStop.addEventListener("click", stopMic);
 btnReset.addEventListener("click", resetSession);
+btnVadApply.addEventListener("click", applyVadConfig);
 wsUrlInput.addEventListener("keydown", e => { if (e.key === "Enter") connect(); });
 </script>
 </body>
